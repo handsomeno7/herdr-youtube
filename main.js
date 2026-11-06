@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { appHome, exec, layout, readTextFile, run, props, shared, setShared, theme, openOverlay, nextCommand } from "herdr";
 
@@ -13,6 +13,8 @@ function shown() {
   const tree = layout();
   return find(tree, "office-content")?.active === "youtube" && !find(tree, "office")?.hidden && (find(tree, "right")?.size?.px ?? 400) > 100;
 }
+const RED = "#ff0033";
+const icon = name => svg(`mods/youtube/icons/${name}.svg`);
 const time = value => { const n = Math.max(0, Math.floor(value || 0)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
 
 async function request(command) {
@@ -81,8 +83,9 @@ export default class YouTube extends View {
       try {
         const reply = await request(this.visible !== visible ? { action: "visibility", visible } : { action: "status" });
         this.visible = visible;
+        if (this.refreshFailed) { this.error = ""; this.refreshFailed = false; }
         if (visible && reply.state?.running) await attachTerminal(reply.state.terminal);
-      } catch (error) { this.error = error.message; }
+      } catch (error) { this.error = error.message; this.refreshFailed = true; }
       finally { this.refreshing = false; cx.notify(); }
     });
   }
@@ -114,38 +117,49 @@ export default class YouTube extends View {
       .on_click((_e, cx) => { if (enabled && !this.busy) action(cx); }).child(label);
   }
 
+  iconButton(id, name, tip, action, enabled = true, size = 18) {
+    const t = theme();
+    return div().id(`yt-${id}`).w(28).h(28).flex_none().rounded_full().flex().items_center().justify_center()
+      .text_color(enabled ? t.foreground : t.dim).tooltip(tip)
+      .when(enabled, e => e.cursor_pointer().hover(s => s.bg(t.hover)))
+      .on_click((_e, cx) => { if (enabled && !this.busy) action(cx); }).child(icon(name).size(size));
+  }
+
   tabs() {
     const active = find(layout(), "office-content")?.active ?? "office-scene";
     return h_flex().size_full().px(5).gap(2).items_center()
       .children([["office-scene", "The Office"], ["youtube", "YouTube"]].map(([id, label]) =>
         this.button(`tab-${id}`, label, () => run("layout.select", { stack: "office-content", child: id }), true, active === id)))
       .child(div().flex_1())
-      .when(active === "youtube", e => e.child(this.button("search", "搜尋", () => this.library("search")))
-        .child(this.button("queue", "清單", () => this.library("queue")))
-        .child(this.button("account", player().login ? "登入中" : player().signedIn ? "已登入" : "登入", cx => this.act({ action: "login" }, cx), !player().login)));
+      .when(active === "youtube", e => e.child(this.iconButton("search", "search", "搜尋", () => this.library("search"), true, 16))
+        .child(this.iconButton("queue", "queue", "播放清單", () => this.library("queue"), true, 16))
+        .child(this.iconButton("account", "account", player().login ? "登入中" : player().signedIn ? "已登入 YouTube" : "登入 YouTube", cx => this.act({ action: "login" }, cx), !player().login, 16)));
   }
 
   controls() {
     const t = theme(), p = player(), ready = p.running && p.video, index = p.queue?.findIndex(x => x.id === p.video) ?? -1;
     const action = name => cx => this.act({ action: name }, cx);
-    return v_flex().size_full().px(6).gap(2).text_color(t.foreground)
-      .child(div().h(16).text_size(10).truncate().text_color(this.error || p.error ? t.blocked : t.muted)
-        .child(this.error || p.error || (p.login ? "請在專用 Chrome 登入 YouTube，完成後關閉視窗。" : p.title) || "搜尋影片或貼上 YouTube 網址"))
-      .child(div().id("yt-seek").h(8).rounded(3).bg(t.raised).cursor_pointer()
-        .on_mouse_down("left", (e, cx) => {
-          if (!ready || !p.duration || !e.bounds) return;
-          const ratio = Math.max(0, Math.min(1, e.local_position.x / e.bounds.width));
-          this.act({ action: "seek", value: ratio * p.duration }, cx);
-        }).child(div().h(8).rounded(3).bg(t.accent).w(`${Math.min(100, (p.time || 0) / (p.duration || 1) * 100)}%`)))
-      .child(h_flex().gap(1).items_center()
-        .child(this.button("prev", "上一部", action("previous"), ready && index > 0))
-        .child(this.button("play", this.busy ? "處理中" : p.paused ? "播放" : "暫停", action(p.paused ? "play" : "pause"), ready))
-        .child(this.button("next", "下一部", action("next"), ready && index >= 0 && index < p.queue.length - 1))
-        .child(div().flex_1().text_size(10).text_color(t.dim).child(`${time(p.time)} / ${p.duration ? time(p.duration) : "直播"}`))
-        .child(this.button("mute", p.muted ? "靜音中" : "聲音", action("mute"), ready))
-        .child(this.button("volume-down", "−", cx => this.act({ action: "volume", value: Math.max(0, (p.volume ?? 50) - 10) }, cx), ready))
-        .child(this.button("volume-up", "+", cx => this.act({ action: "volume", value: Math.min(100, (p.volume ?? 50) + 10) }, cx), ready))
-        .child(this.button("stop", "關閉", action("shutdown"), p.running)));
+    const message = this.error || p.error, volume = p.muted ? 0 : p.volume ?? 50;
+    // Clickable strip taller than the bar it draws, like YouTube's progress bar.
+    const bar = (id, width, percent, color, pick) => div().id(id).w(width).h(8).flex_none().flex().items_center().cursor_pointer()
+      .on_mouse_down("left", (e, cx) => {
+        if (!ready || !e.bounds) return;
+        pick(Math.max(0, Math.min(1, e.local_position.x / e.bounds.width)), cx);
+      }).child(div().w_full().h(3).rounded(2).bg(t.raised).child(div().h(3).rounded(2).bg(color).w(`${Math.min(100, percent)}%`)));
+    return v_flex().size_full().text_color(t.foreground)
+      .child(bar("yt-seek", "100%", (p.time || 0) / (p.duration || 1) * 100, RED, (ratio, cx) => {
+        if (p.duration) this.act({ action: "seek", value: ratio * p.duration }, cx);
+      }))
+      .child(h_flex().flex_1().px(4).gap(1).items_center()
+        .child(this.iconButton("prev", "previous", "上一部", action("previous"), ready && index > 0))
+        .child(this.iconButton("play", p.paused ? "play" : "pause", p.paused ? "播放" : "暫停", action(p.paused ? "play" : "pause"), ready, 20))
+        .child(this.iconButton("next", "next", "下一部", action("next"), ready && index >= 0 && index < p.queue.length - 1))
+        .child(this.iconButton("mute", p.muted ? "muted" : "volume", p.muted ? "取消靜音" : "靜音", action("mute"), ready))
+        .child(bar("yt-volume", 56, volume, t.foreground, (ratio, cx) => this.act({ action: "volume", value: Math.round(ratio * 100) }, cx)))
+        .child(div().ml(8).flex_none().text_size(11).text_color(t.muted).child(`${time(p.time)} / ${p.duration ? time(p.duration) : "LIVE"}`))
+        .child(div().flex_1().min_w(0).px(6).text_size(11).truncate().text_color(message ? t.blocked : t.dim)
+          .child(message || (p.login ? "請在專用 Chrome 登入 YouTube，完成後關閉視窗。" : p.title) || "搜尋影片或貼上 YouTube 網址"))
+        .child(this.iconButton("stop", "close", "關閉播放器", action("shutdown"), p.running, 16)));
   }
 
   renderLibrary() {

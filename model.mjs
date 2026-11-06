@@ -51,14 +51,20 @@ export function extractItems(data) {
   return items;
 }
 
-export function graphicsPacket(data, cols, rows, top = 1, left = 1) {
-  let output = `\x1b[${top};${left}H`;
+// Herdr draws nothing while it decodes a new PNG, so each frame is sent
+// without showing it and placed one frame later; three image ids rotate:
+// the one being sent, the one being shown, and the old one being deleted.
+export function framePacket(data, frame, cols, top = 1, left = 1) {
+  const id = 42 + frame % 3, shown = 42 + (frame + 2) % 3, old = 42 + (frame + 1) % 3;
+  let output = '';
   for (let offset = 0; offset < data.length; offset += 4096) {
     const more = offset + 4096 < data.length ? 1 : 0;
-    // Let the terminal derive height from the source pixels. Sending both
-    // dimensions stretches frames in Herdr's current Kitty implementation.
-    const header = offset ? `m=${more}` : `a=T,f=100,t=d,i=42,p=1,q=2,C=1,c=${cols},m=${more}`;
+    const header = offset ? `m=${more}` : `a=t,f=100,t=d,i=${id},q=2,m=${more}`;
     output += `\x1b_G${header};${data.slice(offset, offset + 4096)}\x1b\\`;
   }
+  // Let the terminal derive height from the source pixels. Sending both
+  // dimensions stretches frames in Herdr's current Kitty implementation.
+  if (frame > 0) output += `\x1b[${top};${left}H\x1b_Ga=p,i=${shown},p=1,q=2,C=1,c=${cols}\x1b\\`;
+  if (frame > 1) output += `\x1b_Ga=d,d=i,i=${old},q=2\x1b\\`;
   return output;
 }

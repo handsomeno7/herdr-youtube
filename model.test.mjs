@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInput, samePage, extractItems, graphicsPacket } from './model.mjs';
+import { parseInput, samePage, extractItems, framePacket } from './model.mjs';
 
 test('matches YouTube canonical query encoding without accepting stale searches', () => {
   assert.ok(samePage('https://www.youtube.com/results?search_query=Big+Buck', 'https://www.youtube.com/results?search_query=Big%20Buck'));
@@ -24,11 +24,18 @@ test('extracts and deduplicates nested search and playlist entries', () => {
 
 test('graphics chunks preserve complete frame bytes and terminate correctly', () => {
   const data = Buffer.alloc(9000, 7).toString('base64');
-  const chunks = [...graphicsPacket(data, 70, 20).matchAll(/\x1b_G([^;]+);([^\x1b]*)\x1b\\/g)];
+  const chunks = [...framePacket(data, 0, 70).matchAll(/\x1b_G([^;]+);([^\x1b]*)\x1b\\/g)];
   assert.equal(chunks.map(x => x[2]).join(''), data);
   assert.equal(chunks.length, 3);
-  assert.ok(chunks[0][1].includes('m=1'));
-  assert.ok(chunks[0][1].includes('p=1'));
-  assert.ok(!chunks[0][1].includes(',r='), 'height must follow the source aspect ratio');
+  assert.ok(chunks[0][1].startsWith('a=t,') && chunks[0][1].includes('m=1'));
   assert.equal(chunks.at(-1)[1], 'm=0');
+});
+
+test('each frame is shown one frame after it is sent, then deleted', () => {
+  const commands = frame => [...framePacket('AAAA', frame, 52, 1, 5).matchAll(/\x1b_G([^;\x1b]+)/g)].map(x => x[1]);
+  assert.deepEqual(commands(0), ['a=t,f=100,t=d,i=42,q=2,m=0']);
+  const third = commands(2);
+  assert.ok(third[0].includes('i=44'), 'sends the new frame');
+  assert.ok(third[1].startsWith('a=p,i=43,p=1') && !third[1].includes(',r='), 'shows the previous frame, height from source');
+  assert.equal(third[2], 'a=d,d=i,i=42,q=2', 'deletes the frame before that');
 });

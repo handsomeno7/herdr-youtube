@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, unlink } from 'node:fs/promises';
 import { userInfo, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseInput, samePage, extractItems, graphicsPacket } from './model.mjs';
+import { parseInput, samePage, extractItems, framePacket } from './model.mjs';
 
 const runtime = `/tmp/herdr-youtube-${userInfo().uid}`;
 const socketPath = `${runtime}/control.sock`;
@@ -22,7 +22,7 @@ function request(command) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let data = '';
-    socket.setTimeout(45000, () => socket.destroy(new Error('播放器回應逾時。')));
+    socket.setTimeout(25000, () => socket.destroy(new Error('播放器回應逾時。')));
     socket.on('connect', () => socket.write(JSON.stringify(command) + '\n'));
     socket.on('error', reject);
     socket.on('data', chunk => { data += chunk; if (data.includes('\n')) { socket.end(); try { resolve(JSON.parse(data)); } catch (e) { reject(e); } } });
@@ -55,9 +55,10 @@ async function connectPage(url) {
   const ws = new WebSocket(url);
   await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', reject, { once: true }); });
   let id = 0;
-  const pending = new Map();
+  const pending = new Map(), listeners = new Map();
   ws.addEventListener('message', event => {
     const msg = JSON.parse(event.data), task = pending.get(msg.id);
+    if (msg.method) { listeners.get(msg.method)?.(msg.params); return; }
     if (!task) return;
     clearTimeout(task.timer); pending.delete(msg.id);
     msg.error ? task.reject(new Error(msg.error.message)) : task.resolve(msg.result);
@@ -75,7 +76,7 @@ async function connectPage(url) {
   };
   await call('Page.enable');
   await call('Emulation.setDeviceMetricsOverride', { width: 640, height: 360, deviceScaleFactor: 1, mobile: false });
-  return { call, evaluate, close: () => ws.close() };
+  return { call, evaluate, on: (method, handler) => listeners.set(method, handler), close: () => ws.close() };
 }
 
 async function serve() {
@@ -88,6 +89,25 @@ async function serve() {
   let queue = [];
   let state = { running: false, title: '', paused: true, muted: false, volume: 50, time: 0, duration: 0, queue, list: null, terminal: process.env.HC_TERMINAL_ID, error: '' };
   let frameCount = 0, frameStart = Date.now();
+  // Chrome pushes frames while playing; only the newest waiting frame is drawn.
+  let casting = false, latestFrame = null, writing = false, frameIndex = 0;
+  const placement = () => {
+    const width = (process.stdout.columns || 50), height = (process.stdout.rows || 14);
+    const cols = Math.max(1, Math.min(width, Math.floor(height * cell.height * 16 / 9 / cell.width)));
+    const rows = Math.max(1, Math.min(height, Math.round(cols * cell.width * 9 / 16 / cell.height)));
+    return { cols, rows, top: Math.floor((height - rows) / 2) + 1, left: Math.floor((width - cols) / 2) + 1 };
+  };
+  const drawFrame = async data => {
+    const { cols, top, left } = placement();
+    if (!process.stdout.write(framePacket(data, frameIndex++, cols, top, left))) await new Promise(resolve => process.stdout.once('drain', resolve));
+    frameCount++;
+  };
+  async function pumpFrames() {
+    if (writing) return;
+    writing = true;
+    try { while (latestFrame) { const data = latestFrame; latestFrame = null; await drawFrame(data); } }
+    finally { writing = false; }
+  }
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   let inputBuffer = '';
   process.stdin.on('data', data => {
@@ -116,7 +136,7 @@ async function serve() {
     await mkdir(profile, { recursive: true, mode: 0o700 });
     await unlink(`${profile}/DevToolsActivePort`).catch(() => {});
     let errors = '';
-    chrome = spawn('/usr/bin/google-chrome', ['--headless=new', '--no-first-run', '--no-default-browser-check', '--password-store=gnome-libsecret', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--autoplay-policy=no-user-gesture-required', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], env: browserEnv() });
+    chrome = spawn('/usr/bin/google-chrome', ['--headless=new', '--disable-extensions', '--no-first-run', '--no-default-browser-check', '--password-store=gnome-libsecret', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--autoplay-policy=no-user-gesture-required', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], env: browserEnv() });
     chrome.stderr.on('data', chunk => { errors = (errors + chunk).slice(-3000); });
     for (let i = 0; i < 100; i++) {
       if (chrome.exitCode !== null) throw new Error(`Chrome 啟動失敗：${errors}`);
@@ -126,6 +146,13 @@ async function serve() {
     if (!port) throw new Error('Chrome 啟動逾時。');
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     player = await connectPage(pages.find(p => p.type === 'page').webSocketDebuggerUrl);
+    const page = player;
+    page.on('Page.screencastFrame', ({ data, sessionId }) => {
+      page.call('Page.screencastFrameAck', { sessionId }).catch(() => {});
+      if (page !== player || !casting) return;
+      latestFrame = data;
+      pumpFrames();
+    });
     const tab = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
     discovery = await connectPage(tab.webSocketDebuggerUrl);
     state.running = true;
@@ -172,12 +199,12 @@ async function serve() {
   }
   async function updateState() {
     if (!player || loading) return;
-    const result = await player.evaluate(`JSON.stringify((()=>{const v=document.querySelector('video'),p=document.querySelector('#movie_player'),u=new URL(location.href);return {video:u.searchParams.get('v'),title:document.title.replace(/ - YouTube$/,''),signedIn:window.ytcfg?.get('LOGGED_IN')===true,time:v?.currentTime||0,duration:Number.isFinite(v?.duration)?v.duration:0,paused:v?.paused??true,muted:v?.muted??false,volume:Math.round((v?.volume??.5)*100),error:document.querySelector('.ytp-error-content-wrap-reason')?.innerText||v?.error?.message||'',ad:!!p?.classList.contains('ad-showing')}})())`);
+    const result = await player.evaluate(`JSON.stringify((()=>{const v=document.querySelector('video'),p=document.querySelector('#movie_player'),u=new URL(location.href);return {video:u.searchParams.get('v'),title:document.title.replace(/ - YouTube$/,'').replace(/^\\(\\d+\\) /,''),signedIn:window.ytcfg?.get('LOGGED_IN')===true,time:v?.currentTime||0,duration:Number.isFinite(v?.duration)?v.duration:0,paused:v?.paused??true,muted:v?.muted??false,volume:Math.round((v?.volume??.5)*100),error:document.querySelector('.ytp-error-content-wrap-reason')?.innerText||v?.error?.message||'',ad:!!p?.classList.contains('ad-showing')}})())`);
     Object.assign(state, JSON.parse(result));
   }
   async function handle(command) {
     const { action } = command;
-    if (action === 'status') { await updateState(); return { state: { ...state, fps: Number((frameCount / Math.max(1, (Date.now() - frameStart) / 1000)).toFixed(1)) } }; }
+    if (action === 'status') return { state: { ...state, fps: Number((frameCount / Math.max(1, (Date.now() - frameStart) / 1000)).toFixed(1)) } };
     if (action === 'shutdown') { await stopBrowser(); return { state }; }
     if (action === 'login') {
       if (state.login) return { state };
@@ -253,10 +280,14 @@ async function serve() {
       const end = input.indexOf('\n');
       if (end < 0) return;
       const line = input.slice(0, end); input = '';
-      serial = serial.then(async () => {
+      const reply = async () => {
         try { const result = await handle(JSON.parse(line)); socket.end(JSON.stringify({ ok: true, ...result }) + '\n'); }
         catch (error) { state.error = error.message; socket.end(JSON.stringify({ ok: false, error: error.message, state }) + '\n'); }
-      });
+      };
+      // status only reads the cached state, so it never waits behind a slow command.
+      let status = false;
+      try { status = JSON.parse(line).action === 'status'; } catch {}
+      if (status) reply(); else serial = serial.then(reply);
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
@@ -267,17 +298,26 @@ async function serve() {
   process.once('SIGTERM', cleanup); process.once('SIGINT', cleanup); process.once('SIGHUP', cleanup);
   while (!ending) {
     const started = Date.now();
-    if (player && !loading && visible && state.video) {
-      try {
-        const { data } = await player.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
-        const width = (process.stdout.columns || 50), height = (process.stdout.rows || 14);
-        const cols = Math.max(1, Math.min(width, Math.floor(height * cell.height * 16 / 9 / cell.width)));
-        const rows = Math.max(1, Math.min(height, Math.round(cols * cell.width * 9 / 16 / cell.height)));
-        const out = graphicsPacket(data, cols, rows, Math.floor((height - rows) / 2) + 1, Math.floor((width - cols) / 2) + 1);
-        if (!process.stdout.write(out)) await new Promise(resolve => process.stdout.once('drain', resolve));
-        frameCount++;
-      } catch (error) { if (!loading && player) state.error = error.message; }
+    if (player && !loading) {
+      try { await updateState(); } catch (error) { if (!loading && player) state.error = error.message; }
     }
+    const show = player && !loading && visible && state.video;
+    try {
+      if (!player) casting = false;
+      else if (show && !state.paused && !casting) {
+        const { cols, rows } = placement();
+        await player.call('Page.startScreencast', { format: 'png', maxWidth: Math.round(cols * cell.width), maxHeight: Math.round(rows * cell.height), everyNthFrame: 1 });
+        casting = true;
+      } else if (casting && (!show || state.paused)) {
+        casting = false; latestFrame = null;
+        await player.call('Page.stopScreencast');
+      }
+      // Paused: no new frames come, so keep a still picture (and show seeks).
+      if (show && state.paused) {
+        const { data } = await player.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+        await drawFrame(data);
+      }
+    } catch (error) { if (!loading && player) state.error = error.message; }
     await delay(Math.max(10, (state.paused ? 500 : 100) - (Date.now() - started)));
   }
 }
