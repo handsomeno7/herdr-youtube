@@ -14,12 +14,15 @@ Herdr 右側面板裡的 YouTube 播放器 mod。後端在背景開一個 headle
 
 ## 安裝
 
-Herdr 從 `~/.config/herdr-app/mods/youtube` 讀這個 mod。那裡是指到本 repo 的 symlink，由 chezmoi 管理：
+Herdr 從 `~/.config/herdr-app/mods/youtube` 讀這個 mod，所以 repo 直接 clone 在那裡：
 
 ```sh
-ln -s ../../../src/herdr-youtube ~/.config/herdr-app/mods/youtube
+git clone git@github.com:handsomeno7/herdr-youtube.git ~/.config/herdr-app/mods/youtube
+ln -s ../.config/herdr-app/mods/youtube ~/src/herdr-youtube
 herdr-app check ~/.config/herdr-app/mods/youtube
 ```
+
+不要反過來把 `mods/youtube` 做成指到別處的 symlink：Herdr 不會追蹤 symlink 資料夾裡的變動，改檔後不會自動重新載入。chezmoi 在 `.chezmoiignore` 裡略過這個資料夾，由本 repo 自己管。
 
 `gpui-kit.d.ts` 與 `jsconfig.json` 是 Herdr 每次執行時寫入的，不進 git。
 
