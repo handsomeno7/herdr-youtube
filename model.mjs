@@ -56,6 +56,13 @@ export function extractItems(data) {
   return items;
 }
 
+// A Mix has no /playlist page; its videos are only in the watch page's
+// playlist panel. The rest of that page is recommendations, not the Mix.
+export function extractPanel(html) {
+  const data = JSON.parse(/var ytInitialData = (\{.*?\});<\/script>/s.exec(html)?.[1] ?? 'null');
+  return extractItems(data?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents ?? []).filter(x => x.type === 'video');
+}
+
 export function extractSearchPage(data) {
   const commands = data?.onResponseReceivedCommands ?? data?.onResponseReceivedActions;
   const contents = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents

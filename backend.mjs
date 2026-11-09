@@ -4,7 +4,7 @@ import { access, mkdir, readFile, writeFile, chmod, unlink } from 'node:fs/promi
 import { userInfo, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseInput, samePage, extractItems, extractSearchPage, framePacket } from './model.mjs';
+import { parseInput, samePage, extractItems, extractSearchPage, extractPanel, framePacket } from './model.mjs';
 
 const runtime = `/tmp/herdr-youtube-${userInfo().uid}`;
 const socketPath = `${runtime}/control.sock`;
@@ -86,7 +86,7 @@ async function serve() {
   await unlink(socketPath).catch(e => { if (e.code !== 'ENOENT') throw e; });
   let chrome, player, discovery, port, loading = false, visible = true;
   let cell = { width: 8, height: 17 };
-  let queue = [];
+  let queue = [], refilled = null;
   let state = { running: false, title: '', paused: true, muted: false, volume: 50, time: 0, duration: 0, queue, list: null, terminal: process.env.HC_TERMINAL_ID, error: '' };
   let frameCount = 0, frameStart = Date.now();
   // Chrome pushes frames while playing; only the newest waiting frame is drawn.
@@ -175,6 +175,15 @@ async function serve() {
       } catch { /* A missing thumbnail must not block search or playback. */ }
     }));
   }
+  // A Mix has no /playlist page, so its videos come from the watch page.
+  async function mixQueue(list, video) {
+    const url = `https://www.youtube.com/watch?${video ? `v=${video}&` : ''}list=${list}`;
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36', 'Accept-Language': 'en' }, signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error(`YouTube returned ${response.status} for this Mix.`);
+    const items = extractPanel(await response.text());
+    await cacheThumbnails(items);
+    return items;
+  }
   async function pageItems(url) {
     await discovery.call('Page.navigate', { url });
     // Wait for this navigation's data, rather than accepting the previous page.
@@ -241,6 +250,11 @@ async function serve() {
     if (!player || loading) return;
     const result = await player.evaluate(`JSON.stringify((()=>{const v=document.querySelector('video'),p=document.querySelector('#movie_player'),u=new URL(location.href);return {video:u.searchParams.get('v'),title:document.title.replace(/ - YouTube$/,'').replace(/^\\(\\d+\\) /,''),signedIn:window.ytcfg?.get('LOGGED_IN')===true,time:v?.currentTime||0,duration:Number.isFinite(v?.duration)?v.duration:0,paused:v?.paused??true,muted:v?.muted??false,volume:Math.round((v?.volume??.5)*100),error:document.querySelector('.ytp-error-content-wrap-reason')?.innerText||v?.error?.message||'',ad:!!p?.classList.contains('ad-showing')}})())`);
     Object.assign(state, JSON.parse(result));
+    // YouTube keeps a Mix going past the videos we read; fetch the next batch once per video.
+    if (state.list?.startsWith('RD') && state.video && refilled !== state.video && !queue.some(x => x.id === state.video)) {
+      const video = refilled = state.video, list = state.list;
+      mixQueue(list, video).then(items => { if (items.length && state.video === video) { queue = items; state.queue = queue; } }).catch(() => {});
+    }
   }
   async function handle(command) {
     const { action } = command;
@@ -288,11 +302,22 @@ async function serve() {
         const page = await pageItems(`https://www.youtube.com/results?search_query=${encodeURIComponent(parsed.query)}`);
         return { state, results: page.items, search: { query: parsed.query, continuation: page.continuation } };
       }
-      if (parsed.list) {
+      if (parsed.list?.startsWith('RD')) {
+        queue = await mixQueue(parsed.list, parsed.video);
+        if (!queue.length) throw new Error('Could not read this Mix. Try again.');
+        state.queue = queue;
+        await load(parsed.video || queue[0].id, parsed.list);
+      } else if (parsed.list) {
         queue = (await pageItems(`https://www.youtube.com/playlist?list=${parsed.list}`)).items.filter(x => x.type === 'video');
         state.queue = queue;
         await load(parsed.video || queue[0]?.id, parsed.list);
-      } else { queue = []; state.queue = queue; await load(parsed.video); }
+      } else {
+        // A single video plays on as a Mix radio, like YouTube's own autoplay.
+        const list = `RD${parsed.video}`;
+        queue = await mixQueue(list, parsed.video).catch(() => []);
+        state.queue = queue;
+        await load(parsed.video, queue.length ? list : undefined);
+      }
       await updateState(); return { state };
     }
     if (!player) throw new Error('Select a video first.');

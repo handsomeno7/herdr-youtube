@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInput, samePage, extractItems, extractSearchPage, framePacket } from './model.mjs';
+import { parseInput, samePage, extractItems, extractSearchPage, extractPanel, framePacket } from './model.mjs';
 
 test('matches YouTube canonical query encoding without accepting stale searches', () => {
   assert.ok(samePage('https://www.youtube.com/results?search_query=Big+Buck', 'https://www.youtube.com/results?search_query=Big%20Buck'));
@@ -70,4 +70,15 @@ test('search cursors come from the main results, not nested recommendation shelv
   }
   assert.throws(() => extractSearchPage({ error: { message: 'Search unavailable' } }), /invalid search results/);
   assert.throws(() => extractSearchPage({ onResponseReceivedCommands: [{ appendContinuationItemsAction: { continuationItems: [cursor(123)] } }] }), /invalid search cursor/);
+});
+
+test('Mix queue comes from the playlist panel, not the recommendations beside it', () => {
+  const video = id => ({ playlistPanelVideoRenderer: { videoId: id, title: { simpleText: id } } });
+  const data = { contents: { twoColumnWatchNextResults: {
+    playlist: { playlist: { contents: [video('aaaaaaaaaaa'), video('bbbbbbbbbbb')] } },
+    secondaryResults: { results: [{ videoRenderer: { videoId: 'ccccccccccc', title: { simpleText: 'Recommended' } } }] },
+  } } };
+  const html = `<script>var ytInitialData = ${JSON.stringify(data)};</script>`;
+  assert.deepEqual(extractPanel(html).map(x => x.id), ['aaaaaaaaaaa', 'bbbbbbbbbbb']);
+  assert.deepEqual(extractPanel('<html>no data</html>'), []);
 });
