@@ -1,10 +1,10 @@
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile, chmod, unlink } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile, chmod, unlink } from 'node:fs/promises';
 import { userInfo, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseInput, samePage, extractItems, framePacket } from './model.mjs';
+import { parseInput, samePage, extractItems, extractSearchPage, framePacket } from './model.mjs';
 
 const runtime = `/tmp/herdr-youtube-${userInfo().uid}`;
 const socketPath = `${runtime}/control.sock`;
@@ -22,7 +22,7 @@ function request(command) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let data = '';
-    socket.setTimeout(25000, () => socket.destroy(new Error('播放器回應逾時。')));
+    socket.setTimeout(25000, () => socket.destroy(new Error('The player response timed out.')));
     socket.on('connect', () => socket.write(JSON.stringify(command) + '\n'));
     socket.on('error', reject);
     socket.on('data', chunk => { data += chunk; if (data.includes('\n')) { socket.end(); try { resolve(JSON.parse(data)); } catch (e) { reject(e); } } });
@@ -42,7 +42,7 @@ if (process.argv[2] === 'request') {
           try { result = await request(command); break; } catch (e) { if (!['ENOENT', 'ECONNREFUSED'].includes(e.code)) throw e; }
           await delay(100);
         }
-        if (!result) throw new Error(start.status !== 0 ? start.stderr || start.stdout : '播放器啟動逾時。');
+        if (!result) throw new Error(start.status !== 0 ? start.stderr || start.stdout : 'The player did not start in time.');
       }
     }
     console.log(JSON.stringify(result));
@@ -63,15 +63,15 @@ async function connectPage(url) {
     clearTimeout(task.timer); pending.delete(msg.id);
     msg.error ? task.reject(new Error(msg.error.message)) : task.resolve(msg.result);
   });
-  ws.addEventListener('close', () => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('瀏覽器連線已關閉。')); } pending.clear(); });
+  ws.addEventListener('close', () => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('The browser connection closed.')); } pending.clear(); });
   const call = (method, params = {}) => new Promise((resolve, reject) => {
     const key = ++id;
-    const timer = setTimeout(() => { pending.delete(key); reject(new Error(`瀏覽器操作逾時：${method}`)); }, 20000);
+    const timer = setTimeout(() => { pending.delete(key); reject(new Error(`Browser operation timed out: ${method}`)); }, 20000);
     pending.set(key, { resolve, reject, timer }); ws.send(JSON.stringify({ id: key, method, params }));
   });
   const evaluate = async (expression, userGesture = false) => {
     const r = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture });
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description?.split('\n')[0] || r.exceptionDetails.text);
     return r.result.value;
   };
   await call('Page.enable');
@@ -82,7 +82,7 @@ async function connectPage(url) {
 async function serve() {
   await mkdir(runtime, { recursive: true, mode: 0o700 });
   await chmod(runtime, 0o700);
-  try { await request({ action: 'status' }); throw new Error('播放器已經在執行。'); } catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error; }
+  try { await request({ action: 'status' }); throw new Error('The player is already running.'); } catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error; }
   await unlink(socketPath).catch(e => { if (e.code !== 'ENOENT') throw e; });
   let chrome, player, discovery, port, loading = false, visible = true;
   let cell = { width: 8, height: 17 };
@@ -131,7 +131,7 @@ async function serve() {
     });
   };
   async function ensureBrowser() {
-    if (state.login) throw new Error('請先完成登入並關閉專用 Chrome 視窗。');
+    if (state.login) throw new Error('Finish signing in and close the dedicated Chrome window first.');
     if (player) return;
     await mkdir(profile, { recursive: true, mode: 0o700 });
     await unlink(`${profile}/DevToolsActivePort`).catch(() => {});
@@ -139,11 +139,11 @@ async function serve() {
     chrome = spawn('/usr/bin/google-chrome', ['--headless=new', '--disable-extensions', '--no-first-run', '--no-default-browser-check', '--password-store=gnome-libsecret', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--autoplay-policy=no-user-gesture-required', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], env: browserEnv() });
     chrome.stderr.on('data', chunk => { errors = (errors + chunk).slice(-3000); });
     for (let i = 0; i < 100; i++) {
-      if (chrome.exitCode !== null) throw new Error(`Chrome 啟動失敗：${errors}`);
+      if (chrome.exitCode !== null) throw new Error(`Chrome failed to start: ${errors}`);
       try { port = Number((await readFile(`${profile}/DevToolsActivePort`, 'utf8')).split('\n')[0]); break; } catch {}
       await delay(100);
     }
-    if (!port) throw new Error('Chrome 啟動逾時。');
+    if (!port) throw new Error('Chrome did not start in time.');
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     player = await connectPage(pages.find(p => p.type === 'page').webSocketDebuggerUrl);
     const page = player;
@@ -159,6 +159,22 @@ async function serve() {
     const browser = chrome;
     chrome.once('exit', () => { if (chrome !== browser) return; player?.close(); discovery?.close(); player = discovery = null; state.running = false; chrome = null; });
   }
+  async function cacheThumbnails(items) {
+    const cache = new URL('./.cache/thumbnails/', import.meta.url);
+    await mkdir(cache, { recursive: true });
+    await Promise.all(items.map(async item => {
+      if (!item.thumbnail) return;
+      const name = `${item.type}-${item.id}.jpg`, file = new URL(name, cache);
+      try {
+        try { await access(file); } catch {
+          const response = await fetch(item.thumbnail, { signal: AbortSignal.timeout(3000) });
+          if (!response.ok) return;
+          await writeFile(file, Buffer.from(await response.arrayBuffer()));
+        }
+        item.thumbnailFile = `mods/youtube/.cache/thumbnails/${name}`;
+      } catch { /* A missing thumbnail must not block search or playback. */ }
+    }));
+  }
   async function pageItems(url) {
     await discovery.call('Page.navigate', { url });
     // Wait for this navigation's data, rather than accepting the previous page.
@@ -167,12 +183,36 @@ async function serve() {
       const page = JSON.parse(r);
       if (samePage(page.url, url) && page.ready !== 'loading') {
         const items = extractItems(page.data);
-        if (items.length) { await player.call('Page.bringToFront'); return items; }
-        if (/Sign in to confirm|確認您不是機器人|This playlist does not exist|這個播放清單不存在|private playlist|私人播放清單/i.test(page.text)) throw new Error('YouTube 要求登入，或這份清單無法公開讀取。');
+        if (items.length) {
+          await cacheThumbnails(items);
+          await player.call('Page.bringToFront');
+          return { items, continuation: url.includes('/results?') ? extractSearchPage(page.data).continuation : null };
+        }
+        if (/Sign in to confirm|確認您不是機器人|This playlist does not exist|這個播放清單不存在|private playlist|私人播放清單/i.test(page.text)) throw new Error('YouTube requires sign-in, or this playlist is unavailable.');
       }
       await delay(250);
     }
-    throw new Error('找不到結果，或 YouTube 頁面無法讀取。');
+    throw new Error('No results found, or the YouTube page could not be read.');
+  }
+  async function moreSearch(command) {
+    const parsed = parseInput(command.input), continuation = command.continuation;
+    if (!parsed.query || typeof continuation !== 'string' || !continuation.length || continuation.length > 20000) throw new Error('Invalid search cursor. Search again.');
+    await ensureBrowser();
+    if (!await discovery.evaluate(`Boolean(window.ytcfg?.get('INNERTUBE_CONTEXT'))`)) {
+      await pageItems(`https://www.youtube.com/results?search_query=${encodeURIComponent(parsed.query)}`);
+    }
+    const data = await discovery.evaluate(`(async () => {
+      const response = await fetch('/youtubei/v1/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(12000),
+        body: JSON.stringify({ context: window.ytcfg.get('INNERTUBE_CONTEXT'), continuation: ${JSON.stringify(continuation)} })
+      });
+      if (!response.ok) throw new Error('Could not load more results. Try again.');
+      return await response.json();
+    })()`);
+    const next = extractSearchPage(data);
+    if (next.continuation === continuation) throw new Error('YouTube did not advance the search. Try again.');
+    await cacheThumbnails(next.items);
+    return { state, results: next.items, search: { query: parsed.query, continuation: next.continuation } };
   }
   async function load(video, list) {
     const parsed = parseInput(`https://www.youtube.com/watch?v=${video}${list ? `&list=${list}` : ''}`);
@@ -187,7 +227,7 @@ async function serve() {
         if (ready) break;
         await delay(250);
       }
-      if (!ready) throw new Error('播放器載入逾時。');
+      if (!ready) throw new Error('The video did not load in time.');
       await player.evaluate(`(() => {
         const style=document.createElement('style'); style.id='herdr-player-style';
         style.textContent='html,body{margin:0!important;padding:0!important;overflow:hidden!important;background:black!important} #movie_player{position:fixed!important;inset:0!important;margin:0!important;padding:0!important;background:black!important;width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;z-index:2147483647!important} video{width:100vw!important;height:100vh!important;left:0!important;top:0!important;object-fit:contain!important;background:black!important} .ytp-chrome-top,.ytp-chrome-bottom,.ytp-gradient-top,.ytp-gradient-bottom{opacity:0!important;pointer-events:none!important}';
@@ -220,7 +260,7 @@ async function serve() {
       browser.once('exit', code => {
         if (chrome !== browser) return;
         chrome = null; state.login = false;
-        if (code !== 0) { state.error = `登入視窗無法開啟：${errors}`; return; }
+        if (code !== 0) { state.error = `Could not open the sign-in window: ${errors}`; return; }
         serial = serial.then(async () => {
           try {
             await ensureBrowser();
@@ -235,38 +275,42 @@ async function serve() {
       return { state };
     }
     if (action === 'visibility') {
-      if (typeof command.visible !== 'boolean') throw new Error('顯示狀態格式錯誤。');
+      if (typeof command.visible !== 'boolean') throw new Error('Invalid visibility value.');
       visible = command.visible;
       if (!visible && player) await player.evaluate(`document.querySelector('video')?.pause()`);
       await updateState(); return { state };
     }
+    if (action === 'more') return await moreSearch(command);
     if (action === 'search' || action === 'open') {
       const parsed = parseInput(command.input);
       await ensureBrowser();
-      if (parsed.query) return { state, results: await pageItems(`https://www.youtube.com/results?search_query=${encodeURIComponent(parsed.query)}`) };
+      if (parsed.query) {
+        const page = await pageItems(`https://www.youtube.com/results?search_query=${encodeURIComponent(parsed.query)}`);
+        return { state, results: page.items, search: { query: parsed.query, continuation: page.continuation } };
+      }
       if (parsed.list) {
-        queue = (await pageItems(`https://www.youtube.com/playlist?list=${parsed.list}`)).filter(x => x.type === 'video');
+        queue = (await pageItems(`https://www.youtube.com/playlist?list=${parsed.list}`)).items.filter(x => x.type === 'video');
         state.queue = queue;
         await load(parsed.video || queue[0]?.id, parsed.list);
       } else { queue = []; state.queue = queue; await load(parsed.video); }
       await updateState(); return { state };
     }
-    if (!player) throw new Error('請先選一部影片。');
+    if (!player) throw new Error('Select a video first.');
     if (action === 'play' || action === 'pause') await player.evaluate(action === 'play' ? `(()=>{document.querySelector('video').play().catch(()=>{});return true})()` : `document.querySelector('video').pause()`, true);
     else if (action === 'mute') await player.evaluate(`(()=>{const v=document.querySelector('video');v.muted=!v.muted})()`, true);
     else if (action === 'volume' || action === 'seek') {
       const value = command.value;
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > (action === 'volume' ? 100 : state.duration)) throw new Error('控制數值超出範圍。');
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > (action === 'volume' ? 100 : state.duration)) throw new Error('The control value is out of range.');
       await player.evaluate(action === 'volume' ? `(()=>{const v=document.querySelector('video');v.volume=${value / 100};v.muted=false})()` : `document.querySelector('video').currentTime=${value}`, true);
     } else if (action === 'next' || action === 'previous') {
       await updateState();
       const index = queue.findIndex(x => x.id === state.video), next = index + (action === 'next' ? 1 : -1);
-      if (index < 0 || next < 0 || next >= queue.length) throw new Error('已到目前清單的開頭或結尾。');
+      if (index < 0 || next < 0 || next >= queue.length) throw new Error('You reached the start or end of the queue.');
       await load(queue[next].id, state.list);
     } else if (action === 'select') {
-      if (!Number.isInteger(command.index) || !queue[command.index]) throw new Error('清單項目不存在。');
+      if (!Number.isInteger(command.index) || !queue[command.index]) throw new Error('This queue item does not exist.');
       await load(queue[command.index].id, state.list);
-    } else throw new Error('未知的播放器指令。');
+    } else throw new Error('Unknown player command.');
     await updateState(); return { state };
   }
   let serial = Promise.resolve();
@@ -276,7 +320,7 @@ async function serve() {
     socket.on('error', () => {});
     socket.on('data', chunk => {
       input += chunk;
-      if (input.length > 8192) { socket.destroy(); return; }
+      if (input.length > 32768) { socket.destroy(); return; }
       const end = input.indexOf('\n');
       if (end < 0) return;
       const line = input.slice(0, end); input = '';

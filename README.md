@@ -35,7 +35,14 @@ herdr-app check ~/.config/herdr-app/mods/youtube
 | `model.mjs` | 純函式：解析網址、讀 YouTube 頁面資料、組 Kitty 圖片封包 |
 | `icons/` | 控制列圖示，Herdr 依文字顏色上色 |
 
-測試：`node model.test.mjs`
+測試：`node --test *.test.mjs`
+
+搜尋視窗使用英文介面。Esc、右上角 Close 與點擊視窗外都能關閉。
+結果顯示縮圖，每頁 8 筆；用滾輪或拖曳捲軸瀏覽，按 Previous／Next 換頁。
+翻到已載入結果的最後一頁，按 Load more 會向 YouTube 載入下一批並去除重複項目。
+頁碼只顯示目前頁數；YouTube 不再提供下一批時才顯示總頁數與 End of results。
+載入失敗會保留結果與分頁位置，可再按 Load more 重試。
+縮圖存於 `.cache/thumbnails/`，下載失敗時顯示播放圖示，仍可選取影片。
 
 ## 設計決定
 
@@ -43,7 +50,7 @@ herdr-app check ~/.config/herdr-app/mods/youtube
 
 **headless Chrome 加 `--disable-extensions`。** 登入用的一般 Chrome 視窗會同步 Google 帳號的擴充功能到專用 profile。headless 載入它們時，擴充功能程序吃掉 130% 以上 CPU，CDP 呼叫要排 10 到 21 秒，出現「瀏覽器操作逾時」。關掉後 CPU 從 267% 降到約 30%。
 
-**`status` 不排隊。** Herdr 的 `exec` 只等 30 秒。`status` 直接回傳快取的狀態，不進 `serial` 佇列；狀態由畫面迴圈每輪呼叫 `updateState()` 更新。`request` 的 socket 逾時是 25 秒，比 30 秒短，逾時時回中文錯誤，不會被 Herdr 砍掉。
+**`status` 不排隊。** Herdr 的 `exec` 只等 30 秒。`status` 直接回傳快取的狀態，不進 `serial` 佇列；狀態由畫面迴圈每輪呼叫 `updateState()` 更新。`request` 的 socket 逾時是 25 秒，比 30 秒短，逾時時回英文錯誤，不會被 Herdr 砍掉。
 
 **用 screencast，不用 `captureScreenshot` 輪詢。** 輪詢是要一張、等一張，640×360 的 PNG 一張要 96 ms，上限約 10 fps。screencast 用實際顯示的大小，Chrome 主動推畫面，實測約 25 fps。終端機還在寫上一張時只留最新一張，畫面不會越積越延遲。暫停時停掉 screencast，改每 0.5 秒截一張靜止畫面。
 

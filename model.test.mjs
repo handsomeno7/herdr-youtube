@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInput, samePage, extractItems, framePacket } from './model.mjs';
+import { parseInput, samePage, extractItems, extractSearchPage, framePacket } from './model.mjs';
 
 test('matches YouTube canonical query encoding without accepting stale searches', () => {
   assert.ok(samePage('https://www.youtube.com/results?search_query=Big+Buck', 'https://www.youtube.com/results?search_query=Big%20Buck'));
@@ -38,4 +38,36 @@ test('each frame is shown one frame after it is sent, then deleted', () => {
   assert.ok(third[0].includes('i=44'), 'sends the new frame');
   assert.ok(third[1].startsWith('a=p,i=43,p=1') && !third[1].includes(',r='), 'shows the previous frame, height from source');
   assert.equal(third[2], 'a=d,d=i,i=42,q=2', 'deletes the frame before that');
+});
+
+test('extracts video and playlist thumbnails, rejecting external image hosts', () => {
+  const playlist = (id, url) => ({ playlistRenderer: { playlistId: id, title: { simpleText: id }, thumbnails: [{ thumbnails: [{ url }] }] } });
+  const items = extractItems([
+    { videoRenderer: { videoId: 'aqz-KE-bpKQ', title: { simpleText: 'Video' } } },
+    playlist('PLgood', 'https://i.ytimg.com/vi/aqz-KE-bpKQ/hqdefault.jpg'),
+    playlist('PLbad', 'https://i.ytimg.com.evil.test/picture.jpg'),
+    { lockupViewModel: { contentId: 'PLnew', contentType: 'LOCKUP_CONTENT_TYPE_PLAYLIST', metadata: { lockupMetadataViewModel: { title: { content: 'Playlist' } } }, contentImage: { collectionThumbnailViewModel: { primaryThumbnail: { thumbnailViewModel: { image: { sources: [{ url: 'https://i.ytimg.com/vi/aqz-KE-bpKQ/mqdefault.jpg' }] } } } } } } },
+  ]);
+  assert.equal(items[0].thumbnail, 'https://i.ytimg.com/vi/aqz-KE-bpKQ/mqdefault.jpg');
+  assert.equal(items[1].thumbnail, 'https://i.ytimg.com/vi/aqz-KE-bpKQ/hqdefault.jpg');
+  assert.equal(items[2].thumbnail, '');
+  assert.equal(items[3].thumbnail, items[0].thumbnail);
+});
+
+test('search cursors come from the main results, not nested recommendation shelves', () => {
+  const cursor = token => ({ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token } } } });
+  const contents = [{ itemSectionRenderer: { contents: [
+    { videoRenderer: { videoId: 'aqz-KE-bpKQ', title: { simpleText: 'Video' } } },
+    { shelfRenderer: { contents: [cursor('shelf-cursor')] } },
+  ] } }, cursor('search-cursor')];
+  const initial = { contents: { twoColumnSearchResultsRenderer: { primaryContents: { sectionListRenderer: { contents } } } } };
+  const page = extractSearchPage(initial);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.continuation, 'search-cursor');
+  for (const key of ['onResponseReceivedCommands', 'onResponseReceivedActions']) {
+    assert.deepEqual(extractSearchPage({ [key]: [{ appendContinuationItemsAction: { continuationItems: contents } }] }), page);
+    assert.equal(extractSearchPage({ [key]: [{ appendContinuationItemsAction: { continuationItems: contents.slice(0, 1) } }] }).continuation, null);
+  }
+  assert.throws(() => extractSearchPage({ error: { message: 'Search unavailable' } }), /invalid search results/);
+  assert.throws(() => extractSearchPage({ onResponseReceivedCommands: [{ appendContinuationItemsAction: { continuationItems: [cursor(123)] } }] }), /invalid search cursor/);
 });

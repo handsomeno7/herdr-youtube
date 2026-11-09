@@ -1,18 +1,18 @@
 export function parseInput(value) {
   const text = String(value ?? '').trim();
-  if (!text || text.length > 500) throw new Error('請輸入搜尋文字或 YouTube 網址。');
+  if (!text || text.length > 500) throw new Error('Enter a search term or YouTube URL.');
   if (!/^(https?:\/\/|www\.|youtu\.be\/|(?:[\w-]+\.)?youtube\.com\/)/i.test(text)) {
     if (/^[\w-]{11}$/.test(text)) return { video: text };
-    if (text.includes('://')) throw new Error('只接受 YouTube 網址。');
+    if (text.includes('://')) throw new Error('Only YouTube URLs are supported.');
     return { query: text };
   }
   const url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
-  if (!['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be'].includes(url.hostname) || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) throw new Error('只接受 YouTube 網址。');
+  if (!['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be'].includes(url.hostname) || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) throw new Error('Only YouTube URLs are supported.');
   const video = url.hostname === 'youtu.be' ? url.pathname.slice(1) : url.searchParams.get('v') || (/^\/(shorts|live|embed)\/([^/]+)/.exec(url.pathname)?.[2]);
   const list = url.searchParams.get('list');
-  if (video && !/^[\w-]{11}$/.test(video)) throw new Error('影片網址格式不正確。');
-  if (list && !/^[\w-]{2,150}$/.test(list)) throw new Error('播放清單網址格式不正確。');
-  if (!video && !list) throw new Error('請貼影片或播放清單網址。');
+  if (video && !/^[\w-]{11}$/.test(video)) throw new Error('Invalid video URL.');
+  if (list && !/^[\w-]{2,150}$/.test(list)) throw new Error('Invalid playlist URL.');
+  if (!video && !list) throw new Error('Paste a video or playlist URL.');
   return { ...(video ? { video } : {}), ...(list ? { list } : {}) };
 }
 
@@ -25,6 +25,11 @@ export function samePage(current, target) {
 export function extractItems(data) {
   const items = [], seen = new Set();
   const text = value => value?.simpleText || value?.runs?.map(r => r.text).join('') || '';
+  const thumbnail = (type, id, sources = []) => {
+    if (type === 'video') return `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
+    const url = Array.isArray(sources) ? sources.at(-1)?.url : '';
+    return typeof url === 'string' && /^https:\/\/i\.ytimg\.com\//.test(url) ? url : '';
+  };
   function walk(node) {
     if (!node || typeof node !== 'object') return;
     for (const [key, value] of Object.entries(node)) {
@@ -34,7 +39,7 @@ export function extractItems(data) {
         const title = metadata?.title?.content;
         if (type && title && !seen.has(`${type}:${id}`) && (type === 'video' ? /^[\w-]{11}$/.test(id) : /^[\w-]{2,150}$/.test(id))) {
           seen.add(`${type}:${id}`);
-          items.push({ type, id, title, by: metadata.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '', duration: '' });
+          items.push({ type, id, title, by: metadata.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '', duration: '', thumbnail: thumbnail(type, id, value.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel?.image?.sources) });
         }
       } else if (['videoRenderer', 'playlistVideoRenderer', 'playlistPanelVideoRenderer', 'playlistRenderer'].includes(key)) {
         const type = key === 'playlistRenderer' ? 'playlist' : 'video';
@@ -42,13 +47,23 @@ export function extractItems(data) {
         const title = text(value.title);
         if (id && title && !seen.has(`${type}:${id}`) && (type === 'video' ? /^[\w-]{11}$/.test(id) : /^[\w-]{2,150}$/.test(id))) {
           seen.add(`${type}:${id}`);
-          items.push({ type, id, title, by: text(value.ownerText || value.shortBylineText || value.longBylineText), duration: text(value.lengthText) });
+          items.push({ type, id, title, by: text(value.ownerText || value.shortBylineText || value.longBylineText), duration: text(value.lengthText), thumbnail: thumbnail(type, id, value.thumbnails?.[0]?.thumbnails || value.thumbnail?.thumbnails) });
         }
       } else walk(value);
     }
   }
   walk(data);
   return items;
+}
+
+export function extractSearchPage(data) {
+  const commands = data?.onResponseReceivedCommands ?? data?.onResponseReceivedActions;
+  const contents = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents
+    ?? commands?.find(command => command.appendContinuationItemsAction)?.appendContinuationItemsAction?.continuationItems;
+  if (!Array.isArray(contents)) throw new Error('YouTube returned invalid search results. Try again.');
+  const continuation = contents.findLast(item => item.continuationItemRenderer)?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token ?? null;
+  if (continuation !== null && (typeof continuation !== 'string' || !continuation.length || continuation.length > 20000)) throw new Error('YouTube returned an invalid search cursor. Search again.');
+  return { items: extractItems(contents), continuation };
 }
 
 // Herdr draws nothing while it decodes a new PNG, so each frame is sent
