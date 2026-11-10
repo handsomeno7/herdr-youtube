@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInput, samePage, extractItems, extractSearchPage, extractPanel, framePacket } from './model.mjs';
+import { parseInput, samePage, extractItems, extractSearchPage, extractPanel, framePacket, stillPlan } from './model.mjs';
 
 test('matches YouTube canonical query encoding without accepting stale searches', () => {
   assert.ok(samePage('https://www.youtube.com/results?search_query=Big+Buck', 'https://www.youtube.com/results?search_query=Big%20Buck'));
@@ -81,4 +81,12 @@ test('Mix queue comes from the playlist panel, not the recommendations beside it
   const html = `<script>var ytInitialData = ${JSON.stringify(data)};</script>`;
   assert.deepEqual(extractPanel(html).map(x => x.id), ['aaaaaaaaaaa', 'bbbbbbbbbbb']);
   assert.deepEqual(extractPanel('<html>no data</html>'), []);
+});
+
+test('a paused still picture is sent twice per change, then not again', () => {
+  const sends = [];
+  let still = null;
+  for (const key of ['a', 'a', 'a', 'a', 'b', 'b', 'b']) { still = stillPlan(still, key); sends.push(still.send); }
+  assert.deepEqual(sends, [true, true, false, false, true, true, false]);
+  assert.equal(stillPlan(null, 'a').send, true, 'after playing or hiding, the next pause sends again');
 });

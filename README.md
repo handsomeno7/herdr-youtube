@@ -52,7 +52,9 @@ herdr-app check ~/.config/herdr-app/mods/youtube
 
 **`status` 不排隊。** Herdr 的 `exec` 只等 30 秒。`status` 直接回傳快取的狀態，不進 `serial` 佇列；狀態由畫面迴圈每輪呼叫 `updateState()` 更新。`request` 的 socket 逾時是 25 秒，比 30 秒短，逾時時回英文錯誤，不會被 Herdr 砍掉。
 
-**用 screencast，不用 `captureScreenshot` 輪詢。** 輪詢是要一張、等一張，640×360 的 PNG 一張要 96 ms，上限約 10 fps。screencast 用實際顯示的大小，Chrome 主動推畫面，實測約 25 fps。終端機還在寫上一張時只留最新一張，畫面不會越積越延遲。暫停時停掉 screencast，改每 0.5 秒截一張靜止畫面。
+**用 screencast，不用 `captureScreenshot` 輪詢。** 輪詢是要一張、等一張，640×360 的 PNG 一張要 96 ms，上限約 10 fps。screencast 用實際顯示的大小，Chrome 主動推畫面，實測約 25 fps。終端機還在寫上一張時只留最新一張，畫面不會越積越延遲。暫停時停掉 screencast，改截靜止畫面，但只在影片、時間點或面板大小改變時截（每次改變截兩張，因為 seek 後第一輪可能還是舊畫面）。
+
+**暫停時不重送一樣的畫面。** Herdr 0.1.14 收到 Kitty 圖片後，就算送了刪除指令（`d=i` 或 `d=I` 都一樣），GPU 記憶體也不會釋放。2026-11-10 量測：暫停時原本每 0.5 秒重截一張，herdr-app 顯存每 15 秒多 64 MB，幾小時累積到 7 GB；改成畫面條件變了才截之後，暫停 45 秒顯存不動。播放中每秒仍多約 20 MB，要等 Herdr 修。
 
 **先傳後放（`framePacket`）。** 用同一個圖片編號直接覆蓋，Herdr 解新 PNG 的那一瞬間沒有圖可畫，會閃黑。現在每張先用 `a=t` 傳過去但不顯示，下一張進來時才 `a=p` 放上去，再刪掉更早的那張；三個編號輪流。畫面因此晚一張（約 40 ms）。比較過的其他做法：兩個編號輪流覆蓋仍會閃；Unicode 佔位字元會破圖；未壓縮像素不閃，但 screencast 只給 PNG，資料量也是 4 倍。
 

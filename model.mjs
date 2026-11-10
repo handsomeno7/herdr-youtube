@@ -73,6 +73,15 @@ export function extractSearchPage(data) {
   return { items: extractItems(contents), continuation };
 }
 
+// While paused, Herdr keeps every PNG it gets in GPU memory, even after a
+// delete, so a still picture is sent only when what it shows can change.
+// Each change is sent twice: a seek's new frame may not be painted yet on
+// the first tick.
+export function stillPlan(prev, key) {
+  const left = key === prev?.key ? prev.left : 2;
+  return { key, left: Math.max(0, left - 1), send: left > 0 };
+}
+
 // Herdr draws nothing while it decodes a new PNG, so each frame is sent
 // without showing it and placed one frame later; three image ids rotate:
 // the one being sent, the one being shown, and the old one being deleted.

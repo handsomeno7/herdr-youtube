@@ -4,7 +4,7 @@ import { access, mkdir, readFile, writeFile, chmod, unlink } from 'node:fs/promi
 import { userInfo, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseInput, samePage, extractItems, extractSearchPage, extractPanel, framePacket } from './model.mjs';
+import { parseInput, samePage, extractItems, extractSearchPage, extractPanel, framePacket, stillPlan } from './model.mjs';
 
 const runtime = `/tmp/herdr-youtube-${userInfo().uid}`;
 const socketPath = `${runtime}/control.sock`;
@@ -90,7 +90,7 @@ async function serve() {
   let state = { running: false, title: '', paused: true, muted: false, volume: 50, time: 0, duration: 0, queue, list: null, terminal: process.env.HC_TERMINAL_ID, error: '' };
   let frameCount = 0, frameStart = Date.now();
   // Chrome pushes frames while playing; only the newest waiting frame is drawn.
-  let casting = false, latestFrame = null, writing = false, frameIndex = 0;
+  let casting = false, latestFrame = null, writing = false, frameIndex = 0, still = null;
   const placement = () => {
     const width = (process.stdout.columns || 50), height = (process.stdout.rows || 14);
     const cols = Math.max(1, Math.min(width, Math.floor(height * cell.height * 16 / 9 / cell.width)));
@@ -382,7 +382,8 @@ async function serve() {
         await player.call('Page.stopScreencast');
       }
       // Paused: no new frames come, so keep a still picture (and show seeks).
-      if (show && state.paused) {
+      still = show && state.paused ? stillPlan(still, JSON.stringify([state.video, state.time, placement(), cell])) : null;
+      if (still?.send) {
         const { data } = await player.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
         await drawFrame(data);
       }
